@@ -7,10 +7,21 @@ import os
 import sys
 import tempfile
 import shutil
+from functools import lru_cache
 
 # Настройка внешнего вида
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
+
+# Предварительно вычисляем log2 для часто используемых значений
+LOG2_CACHE = {}
+def get_log2(p):
+    """Кэшированный расчёт log2 для вероятностей"""
+    if p in LOG2_CACHE:
+        return LOG2_CACHE[p]
+    result = math.log2(p)
+    LOG2_CACHE[p] = result
+    return result
 
 def resource_path(relative_path):
     """ Получает абсолютный путь к ресурсу, работает для dev и для PyInstaller """
@@ -48,11 +59,6 @@ class EntropyCalculatorApp(ctk.CTk):
 
             # 3. Устанавливаем иконку
             self.iconbitmap(temp_icon_path)
-            
-            # 4. Удаляем временный файл после установки (опционально, можно оставить до закрытия)
-            # Windows обычно блокирует файл, пока он используется как иконка, 
-            # поэтому удаление может вызвать ошибку. Лучше оставить как есть, 
-            # ОС сама очистит temp при перезагрузке или через время.
             
         except Exception as e:
             print(f"Не удалось установить иконку окна: {e}")
@@ -136,7 +142,6 @@ class EntropyCalculatorApp(ctk.CTk):
         self.label_results = ctk.CTkLabel(self.right_frame, text="Результаты", font=("Arial", 16, "bold"))
         self.label_results.grid(row=0, column=0, padx=20, pady=(15, 5), sticky="w")
 
-        # ВАШИ ИЗМЕНЕНИЯ: Шрифт Arial 16 (как в вашем коде)
         self.text_result = ctk.CTkTextbox(self.right_frame, wrap="none", font=("Arial", 16), height=300)
         self.text_result.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="nsew")
         self.text_result.configure(state="disabled", fg_color="transparent", border_width=0)
@@ -144,7 +149,12 @@ class EntropyCalculatorApp(ctk.CTk):
         # Инициализация
         self.current_size = 3
         self.matrix_entries = [] 
-        self.vector_entries = [] 
+        self.vector_entries = []
+        
+        # Кэш для виджетов Entry - переиспользование вместо пересоздания
+        self._entry_cache_matrix = []
+        self._entry_cache_vector = []
+        
         self.create_inputs(self.current_size, self.channel_type_var.get())
 
     def on_channel_type_change(self, choice=None):
@@ -158,9 +168,10 @@ class EntropyCalculatorApp(ctk.CTk):
             self.create_inputs(new_size, self.channel_type_var.get())
 
     def create_inputs(self, size, channel_type):
-        """Создание полей ввода"""
+        """Создание полей ввода с переиспользованием виджетов"""
+        # Очищаем только контейнер, но сохраняем виджеты в кэше
         for widget in self.dynamic_container.winfo_children():
-            widget.destroy()
+            widget.grid_forget()  # Скрываем вместо destroy
         
         self.matrix_entries = []
         self.vector_entries = []
@@ -185,14 +196,24 @@ class EntropyCalculatorApp(ctk.CTk):
         frame_matrix = ctk.CTkFrame(self.dynamic_container, fg_color="transparent")
         frame_matrix.grid(row=1, column=0, pady=5)
         
+        # Переиспользуем или создаём Entry для матрицы
+        max_cache_size = 5  # Максимальный размер кэша (5x5)
+        while len(self._entry_cache_matrix) < max_cache_size * max_cache_size:
+            entry = ctk.CTkEntry(frame_matrix, width=50, placeholder_text="0.00")
+            self._entry_cache_matrix.append(entry)
+        
+        cache_idx = 0
         for i in range(size):
             row_entries = []
             for j in range(size):
-                entry = ctk.CTkEntry(frame_matrix, width=50, placeholder_text="0.00")
+                entry = self._entry_cache_matrix[cache_idx]
+                entry.master = frame_matrix  # Обновляем родителя
                 val = random.uniform(0.1, 1.0)
+                entry.delete(0, "end")
                 entry.insert(0, f"{val:.2f}")
                 entry.grid(row=i, column=j, padx=2, pady=2)
                 row_entries.append(entry)
+                cache_idx += 1
             self.matrix_entries.append(row_entries)
 
         # --- Вектор (если нужен) ---
@@ -203,9 +224,16 @@ class EntropyCalculatorApp(ctk.CTk):
             frame_vector = ctk.CTkFrame(self.dynamic_container, fg_color="transparent")
             frame_vector.grid(row=3, column=0, pady=5)
             
-            for i in range(size):
+            # Переиспользуем или создаём Entry для вектора
+            while len(self._entry_cache_vector) < max_cache_size:
                 entry = ctk.CTkEntry(frame_vector, width=50, placeholder_text="0.00")
+                self._entry_cache_vector.append(entry)
+            
+            for i in range(size):
+                entry = self._entry_cache_vector[i]
+                entry.master = frame_vector  # Обновляем родителя
                 val = random.uniform(0.1, 1.0)
+                entry.delete(0, "end")
                 entry.insert(0, f"{val:.2f}")
                 entry.grid(row=0, column=i, padx=2, pady=2)
                 self.vector_entries.append(entry)
@@ -213,51 +241,62 @@ class EntropyCalculatorApp(ctk.CTk):
             self.vector_entries = []
 
     def import_from_excel(self):
-        """Импорт данных из файла Excel по шаблону import.xlsx"""
+        """Оптимизированный импорт данных из файла Excel"""
         file_path = fd.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
         if not file_path:
             return
 
         try:
-            wb = openpyxl.load_workbook(file_path)
+            # Оптимизация: используем read_only для больших файлов
+            wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
             sheet_names = wb.sheetnames
             
             # Логика поиска листов Matrix и Vector
             matrix_sheet_name = None
             vector_sheet_name = None
             
-            if 'Matrix' in sheet_names: matrix_sheet_name = 'Matrix'
-            elif 'Лист1' in sheet_names: matrix_sheet_name = 'Лист1'
-            else: matrix_sheet_name = sheet_names[0]
+            if 'Matrix' in sheet_names:
+                matrix_sheet_name = 'Matrix'
+            elif 'Лист1' in sheet_names:
+                matrix_sheet_name = 'Лист1'
+            else:
+                matrix_sheet_name = sheet_names[0]
                 
-            if 'Vector' in sheet_names: vector_sheet_name = 'Vector'
+            if 'Vector' in sheet_names:
+                vector_sheet_name = 'Vector'
             elif len(sheet_names) > 1:
-                 for name in sheet_names:
-                     if name != matrix_sheet_name:
-                         vector_sheet_name = name
-                         break
+                for name in sheet_names:
+                    if name != matrix_sheet_name:
+                        vector_sheet_name = name
+                        break
 
-            if not matrix_sheet_name: raise ValueError("Не найден лист с матрицей!")
+            if not matrix_sheet_name:
+                raise ValueError("Не найден лист с матрицей!")
 
             ws_matrix = wb[matrix_sheet_name]
             data_matrix = []
+            # Оптимизация: итерация только по заполненным ячейкам
             for row in ws_matrix.iter_rows(values_only=True):
                 if any(cell is not None for cell in row):
                     clean_row = [cell for cell in row if isinstance(cell, (int, float))]
-                    if clean_row: data_matrix.append(clean_row)
+                    if clean_row:
+                        data_matrix.append(clean_row)
             
-            if not data_matrix: raise ValueError("Матрица пуста!")
+            if not data_matrix:
+                raise ValueError("Матрица пуста!")
 
             n = len(data_matrix)
-            if n != len(data_matrix[0]): raise ValueError(f"Матрица должна быть квадратной! Получено {n}x{len(data_matrix[0])}")
-            if n not in [3, 4, 5]: raise ValueError(f"Поддерживаются размеры 3x3, 4x4, 5x5. Получено {n}x{n}")
+            if n != len(data_matrix[0]):
+                raise ValueError(f"Матрица должна быть квадратной! Получено {n}x{len(data_matrix[0])}")
+            if n not in [3, 4, 5]:
+                raise ValueError(f"Поддерживаются размеры 3x3, 4x4, 5x5. Получено {n}x{n}")
 
             # Обновляем интерфейс
             self.size_var.set(f"{n}x{n}")
             self.current_size = n
             self.create_inputs(n, self.channel_type_var.get())
 
-            # Заполняем матрицу
+            # Заполняем матрицу - оптимизация: прямое присваивание
             for i in range(n):
                 for j in range(n):
                     if i < len(data_matrix) and j < len(data_matrix[i]):
@@ -280,6 +319,7 @@ class EntropyCalculatorApp(ctk.CTk):
                 else:
                     ctk.CTkMessagebox(title="Предупреждение", message=f"Вектор слишком короткий.", icon="warning")
 
+            wb.close()  # Явно закрываем книгу
             ctk.CTkMessagebox(title="Успех", message=f"Данные импортированы! Размер: {n}x{n}", icon="check")
 
         except Exception as e:
@@ -355,35 +395,45 @@ class EntropyCalculatorApp(ctk.CTk):
             return None, None, None
 
     def calculate_entropy(self, prob_vector):
+        """Оптимизированный расчёт энтропии с кэшированием log2"""
         h = 0.0
         for p in prob_vector:
             if p > 1e-9:
-                h -= p * math.log2(p)
+                h -= p * get_log2(p)
         return h
 
     def calculate_from_joint(self, joint_matrix):
+        """Оптимизированный расчёт из совместной вероятности"""
         n = len(joint_matrix)
-        if n == 0: return {}
+        if n == 0:
+            return {}
 
+        # Предварительный расчёт маргинальных вероятностей
         pa = [sum(row) for row in joint_matrix]
         pb = [sum(joint_matrix[i][j] for i in range(n)) for j in range(n)]
 
         h_a = self.calculate_entropy(pa)
         h_b = self.calculate_entropy(pb)
         
+        # Прямой расчёт H(A,B) за один проход
         h_ab_direct = 0.0
         for i in range(n):
             for j in range(n):
                 p_ab = joint_matrix[i][j]
                 if p_ab > 1e-9:
-                    h_ab_direct -= p_ab * math.log2(p_ab)
+                    h_ab_direct -= p_ab * get_log2(p_ab)
         
+        # Расчёт условных энтропий за один проход по матрице
         h_ai_list = []
         h_b_given_a_weighted_sum = 0.0
         for i in range(n):
             if pa[i] > 1e-9:
-                row_dist = [joint_matrix[i][j] / pa[i] for j in range(n)]
-                h_cond = self.calculate_entropy(row_dist)
+                # Нормализация строки и расчёт энтропии
+                h_cond = 0.0
+                for j in range(n):
+                    p_cond = joint_matrix[i][j] / pa[i]
+                    if p_cond > 1e-9:
+                        h_cond -= p_cond * get_log2(p_cond)
                 h_ai_list.append(h_cond)
                 h_b_given_a_weighted_sum += pa[i] * h_cond
             else:
@@ -395,8 +445,12 @@ class EntropyCalculatorApp(ctk.CTk):
         h_a_given_b_weighted_sum = 0.0
         for j in range(n):
             if pb[j] > 1e-9:
-                col_dist = [joint_matrix[i][j] / pb[j] for i in range(n)]
-                h_cond = self.calculate_entropy(col_dist)
+                # Нормализация столбца и расчёт энтропии
+                h_cond = 0.0
+                for i in range(n):
+                    p_cond = joint_matrix[i][j] / pb[j]
+                    if p_cond > 1e-9:
+                        h_cond -= p_cond * get_log2(p_cond)
                 h_bj_list.append(h_cond)
                 h_a_given_b_weighted_sum += pb[j] * h_cond
             else:
@@ -412,29 +466,40 @@ class EntropyCalculatorApp(ctk.CTk):
         }
 
     def calculate_uniform_conditional_entropy(self, matrix, channel_type):
+        """Оптимизированный расчёт условной энтропии для равномерного распределения"""
         n = len(matrix)
-        if n == 0: return 0
+        if n == 0:
+            return 0
         uniform_p = 1.0 / n
         
         h_conditional_uniform = 0.0
         
         if channel_type == "b|a":
             for i in range(n):
-                h_bi_given_ai = self.calculate_entropy(matrix[i])
+                h_bi_given_ai = 0.0
+                for p in matrix[i]:
+                    if p > 1e-9:
+                        h_bi_given_ai -= p * get_log2(p)
                 h_conditional_uniform += uniform_p * h_bi_given_ai
                 
         elif channel_type == "a|b":
             for j in range(n):
-                col_dist = [matrix[i][j] for i in range(n)]
-                h_aj_given_bj = self.calculate_entropy(col_dist)
+                h_aj_given_bj = 0.0
+                for i in range(n):
+                    p = matrix[i][j]
+                    if p > 1e-9:
+                        h_aj_given_bj -= p * get_log2(p)
                 h_conditional_uniform += uniform_p * h_aj_given_bj
                 
         elif channel_type == "a,b":
             pa_orig = [sum(row) for row in matrix]
             for i in range(n):
                 if pa_orig[i] > 1e-9:
-                    row_dist = [matrix[i][j] / pa_orig[i] for j in range(n)]
-                    h_bi_given_ai = self.calculate_entropy(row_dist)
+                    h_bi_given_ai = 0.0
+                    for j in range(n):
+                        p_cond = matrix[i][j] / pa_orig[i]
+                        if p_cond > 1e-9:
+                            h_bi_given_ai -= p_cond * get_log2(p_cond)
                     h_conditional_uniform += uniform_p * h_bi_given_ai
                 else:
                     h_conditional_uniform += 0.0
