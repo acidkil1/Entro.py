@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Entro</string>
+    <string name="action_import">Импорт из Excel</string>
+    <string name="channel_type">Тип канала:</string>
+    <string name="alphabet_size">Размер алфавита (N):</string>
+    <string name="probability_matrix">Матрица вероятностей:</string>
+    <string name="import_button">📂 Импорт</string>
+    <string name="random_button">Случайно</string>
+    <string name="clear_button">Очистить</string>
+    <string name="calculate_button">Рассчитать</string>
+    <string name="results">Результаты</string>
+</resources>
