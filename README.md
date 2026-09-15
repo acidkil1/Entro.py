@@ -33,7 +33,7 @@
    ```
 4. Запустите приложение:
    ```bash
-   python main.py
+   python entro.py
    ```
 
 ## 🧠 Чему я научился и какие навыки развил (Key Takeaways)
