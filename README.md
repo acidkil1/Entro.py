@@ -19,8 +19,8 @@
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone https://github.com/acidkil1/entropy-calculator.git
-   cd entropy-calculator
+   git clone https://github.com/acidkil1/entro.py.git
+   cd entro.py
    ```
 2. Создайте и активируйте виртуальное окружение:
    ```bash
